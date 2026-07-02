@@ -2,7 +2,7 @@
 
 AI-agent monetization gateway using x402 payments, deployed as a **forward-auth sidecar** behind your existing **nginx / OpenResty** reverse proxy. nginx asks AgentGate for a per-request decision — **allow / require-payment (402) / deny** — and after an agent pays via x402, AgentGate issues a short-lived signed JWT so subsequent requests are allowed until it expires.
 
-This is the **Phase-1 MVP** (Mock verifier by default, real x402 verifier scaffolded). The full design, edge-case catalog, and threat model are maintained in the team's Notion design workspace (the **AgentGate — Design & Architecture** pages, 01–09).
+This is the **Phase-1 MVP** (Mock verifier by default, real x402 verifier scaffolded).
 
 ## Quickstart
 
