@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt tidy up up-x402 down logs e2e pay clean
+.PHONY: build run test vet fmt tidy up up-x402 down logs e2e clean
 
 build:
 	go build ./...
@@ -32,9 +32,6 @@ logs:
 
 e2e:
 	./test/e2e.sh
-
-pay:
-	cd client/agentpay && go run . $(PAY_ARGS)
 
 clean:
 	docker compose down -v || true
