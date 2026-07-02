@@ -19,7 +19,8 @@ import (
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	normIP := detector.NormalizeIP(firstNonEmpty(r.Header.Get("X-Real-IP"), r.RemoteAddr))
+	remoteIP := firstNonEmpty(r.Header.Get("X-Real-IP"), r.RemoteAddr)
+	normIP := detector.NormalizeIP(remoteIP)
 	xpay := r.Header.Get("X-PAYMENT")
 	if xpay == "" {
 		writeErr(w, http.StatusBadRequest, "missing_payment", "X-PAYMENT header required")
@@ -34,20 +35,38 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	det := s.Detector.Detect(ctx, detectInput(r, remoteIP))
+	chalID := firstNonEmpty(r.Header.Get("X-AgentGate-Challenge-Id"), challengeID(host, resource))
+	decision := "error"
+	defer func() {
+		s.Analytics.Record(core.Event{
+			RequestPath: resource,
+			AgentClass:  string(det.Class),
+			Operator:    det.Operator,
+			Decision:    decision,
+			IPHash:      hashIP(remoteIP),
+			ChallengeID: chalID,
+			Confidence:  det.Confidence,
+		})
+	}()
+
 	pay, err := payment.DecodePaymentHeader(xpay)
 	if err != nil {
+		decision = "bad_payment"
 		writeErr(w, http.StatusBadRequest, "bad_payment", err.Error())
 		return
 	}
 
 	payerKey := "wallet:" + strings.ToLower(pay.Payload.Authorization.From)
 	if s.abusive(ctx, payerKey) {
+		decision = "deny"
 		writeErr(w, http.StatusForbidden, "forbidden", "wallet temporarily blocked due to repeated failed payments")
 		return
 	}
 
 	dec := s.Policy.Evaluate(ctx, core.PolicyInput{Host: host, Path: resource, Method: method})
 	if dec.Action != core.ActionPay || dec.Policy == nil {
+		decision = "not_payable"
 		writeErr(w, http.StatusBadRequest, "not_payable", "resource does not require payment")
 		return
 	}
@@ -58,9 +77,11 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		s.bumpAbuse(ctx, payerKey)
 		switch reason {
 		case "scheme_mismatch", "network_mismatch", "wrong_pay_to":
+			decision = "requirements_mismatch"
 			observability.PaymentsTotal.WithLabelValues("mismatch").Inc()
 			writeErr(w, http.StatusForbidden, "payment_requirements_mismatch", reason)
 		default:
+			decision = "payment_invalid"
 			observability.PaymentsTotal.WithLabelValues("invalid").Inc()
 			writeErr(w, http.StatusPaymentRequired, "payment_invalid", reason)
 		}
@@ -69,7 +90,6 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 	auth := pay.Payload.Authorization
 	validBefore := payment.ValidBeforeTime(auth)
-	chalID := firstNonEmpty(r.Header.Get("X-AgentGate-Challenge-Id"), challengeID(host, resource))
 
 	claim := core.Payment{
 		Payer:        auth.From,
@@ -89,6 +109,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !inserted {
+		decision = "duplicate"
 		observability.PaymentsTotal.WithLabelValues("duplicate").Inc()
 		s.bumpAbuse(ctx, normIP)
 		s.bumpAbuse(ctx, payerKey)
@@ -99,12 +120,14 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	replayKey := payment.ReplayKey(auth.From, auth.Nonce)
 	ttl := time.Until(validBefore)
 	if ttl <= 0 {
+		decision = "payment_invalid"
 		writeErr(w, http.StatusPaymentRequired, "payment_invalid", "authorization window expired")
 		return
 	}
 	if claimed, rerr := s.Replay.Claim(ctx, replayKey, ttl); rerr != nil {
 		s.Log.Warn("replay store error", zap.Error(rerr))
 	} else if !claimed {
+		decision = "duplicate"
 		observability.PaymentsTotal.WithLabelValues("duplicate").Inc()
 		writeErr(w, http.StatusConflict, "payment_already_used", "this authorization has already been used")
 		return
@@ -114,12 +137,14 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	vr, err := s.Verifier.Verify(ctx, pay, req)
 	observability.VerifierDuration.WithLabelValues("verify", s.Verifier.Name()).Observe(time.Since(vstart).Seconds())
 	if err != nil {
+		decision = "facilitator_error"
 		_ = s.Store.UpdatePaymentFailed(ctx, stored.ID, "verify_error")
 		observability.PaymentsTotal.WithLabelValues("facilitator_error").Inc()
 		writeErr(w, http.StatusBadGateway, "facilitator_unavailable", err.Error())
 		return
 	}
 	if !vr.IsValid {
+		decision = "payment_invalid"
 		_ = s.Store.UpdatePaymentFailed(ctx, stored.ID, vr.InvalidReason)
 		observability.PaymentsTotal.WithLabelValues("invalid").Inc()
 		s.bumpAbuse(ctx, normIP)
@@ -132,12 +157,14 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	sr, err := s.Verifier.Settle(ctx, pay, req, replayKey)
 	observability.VerifierDuration.WithLabelValues("settle", s.Verifier.Name()).Observe(time.Since(sstart).Seconds())
 	if err != nil {
+		decision = "facilitator_error"
 		_ = s.Store.UpdatePaymentFailed(ctx, stored.ID, "settle_error")
 		observability.PaymentsTotal.WithLabelValues("facilitator_error").Inc()
 		writeErr(w, http.StatusBadGateway, "facilitator_unavailable", err.Error())
 		return
 	}
 	if !sr.Success {
+		decision = "settle_failed"
 		_ = s.Store.UpdatePaymentFailed(ctx, stored.ID, sr.ErrorReason)
 		observability.PaymentsTotal.WithLabelValues("settle_failed").Inc()
 		s.bumpAbuse(ctx, normIP)
@@ -173,6 +200,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		s.Log.Error("save grant failed", zap.Error(err))
 	}
 
+	decision = "paid"
 	observability.PaymentsTotal.WithLabelValues("settled").Inc()
 	w.Header().Set("X-PAYMENT-RESPONSE", encodeSettlement(sr))
 	if s.Cfg.PaidRedirectPrefix != "" {
