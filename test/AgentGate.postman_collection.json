@@ -1,0 +1,422 @@
+{
+  "info": {
+    "name": "AgentGate Demo",
+    "description": "Demo requests for the AgentGate compose stack. Point {{baseUrl}} at the gateway (default http://localhost:8088) and {{adminUrl}} at the sidecar admin port (http://localhost:9090). Run the 'Gateway flow' folder top to bottom: the pay step captures the reusable JWT into {{token}} and stores the exact X-PAYMENT into {{xpayValid}} so the replay step can resend it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8088" },
+    { "key": "adminUrl", "value": "http://localhost:9090" },
+    { "key": "payTo", "value": "0x209693Bc6afc0C5328bA36FaF03C514EF312287C" },
+    { "key": "network", "value": "base-sepolia" },
+    { "key": "price", "value": "10000" },
+    { "key": "token", "value": "" },
+    { "key": "xpayValid", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Gateway flow",
+      "item": [
+        {
+          "name": "1. Public path (allowed, no auth)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('public path is served without auth (200)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/public/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["public", "info"]
+            }
+          }
+        },
+        {
+          "name": "2. Blocked path (denied)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('blocked path is denied (403)', function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/blocked/secret",
+              "host": ["{{baseUrl}}"],
+              "path": ["blocked", "secret"]
+            }
+          }
+        },
+        {
+          "name": "3. Protected path (402 x402 challenge)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('protected path returns 402', function () {",
+                  "    pm.response.to.have.status(402);",
+                  "});",
+                  "pm.test('body is a valid x402 challenge', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property('x402Version');",
+                  "    pm.expect(JSON.stringify(b)).to.include('maxAmountRequired');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        },
+        {
+          "name": "4. Pay via X-PAYMENT (200 + origin + token)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function randomHex(bytes) {",
+                  "    let s = '';",
+                  "    for (let i = 0; i < bytes; i++) {",
+                  "        s += ('0' + Math.floor(Math.random() * 256).toString(16)).slice(-2);",
+                  "    }",
+                  "    return '0x' + s;",
+                  "}",
+                  "function buildPayment(value, payTo, network) {",
+                  "    const now = Math.floor(Date.now() / 1000);",
+                  "    const payload = {",
+                  "        x402Version: 1,",
+                  "        scheme: 'exact',",
+                  "        network: network,",
+                  "        payload: {",
+                  "            signature: randomHex(65),",
+                  "            authorization: {",
+                  "                from: randomHex(20),",
+                  "                to: payTo,",
+                  "                value: value,",
+                  "                validAfter: String(now - 10),",
+                  "                validBefore: String(now + 300),",
+                  "                nonce: randomHex(32)",
+                  "            }",
+                  "        }",
+                  "    };",
+                  "    return CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(JSON.stringify(payload)));",
+                  "}",
+                  "const xpay = buildPayment(pm.collectionVariables.get('price'), pm.collectionVariables.get('payTo'), pm.collectionVariables.get('network'));",
+                  "pm.collectionVariables.set('xpayValid', xpay);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('paid retry returns origin content (200)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.text()).to.include('\"upstream\":\"demo\"');",
+                  "});",
+                  "const t = pm.response.headers.get('X-AgentGate-Token');",
+                  "pm.test('paid response carries reusable JWT', function () {",
+                  "    pm.expect(t, 'X-AgentGate-Token header').to.be.a('string').and.not.empty;",
+                  "});",
+                  "if (t) { pm.collectionVariables.set('token', t); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-PAYMENT", "value": "{{xpayValid}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        },
+        {
+          "name": "5. Access with token (200)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('token grants access (200)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        },
+        {
+          "name": "6. Replayed payment (409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('replayed X-PAYMENT is rejected (409)', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-PAYMENT", "value": "{{xpayValid}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        },
+        {
+          "name": "7. Underpayment (402)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function randomHex(bytes) {",
+                  "    let s = '';",
+                  "    for (let i = 0; i < bytes; i++) {",
+                  "        s += ('0' + Math.floor(Math.random() * 256).toString(16)).slice(-2);",
+                  "    }",
+                  "    return '0x' + s;",
+                  "}",
+                  "function buildPayment(value, payTo, network) {",
+                  "    const now = Math.floor(Date.now() / 1000);",
+                  "    const payload = {",
+                  "        x402Version: 1,",
+                  "        scheme: 'exact',",
+                  "        network: network,",
+                  "        payload: {",
+                  "            signature: randomHex(65),",
+                  "            authorization: {",
+                  "                from: randomHex(20),",
+                  "                to: payTo,",
+                  "                value: value,",
+                  "                validAfter: String(now - 10),",
+                  "                validBefore: String(now + 300),",
+                  "                nonce: randomHex(32)",
+                  "            }",
+                  "        }",
+                  "    };",
+                  "    return CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(JSON.stringify(payload)));",
+                  "}",
+                  "const xpay = buildPayment('1', pm.collectionVariables.get('payTo'), pm.collectionVariables.get('network'));",
+                  "pm.collectionVariables.set('xpayLow', xpay);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('underpayment is rejected (402)', function () {",
+                  "    pm.response.to.have.status(402);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-PAYMENT", "value": "{{xpayLow}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        },
+        {
+          "name": "8. Wrong pay_to (403)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function randomHex(bytes) {",
+                  "    let s = '';",
+                  "    for (let i = 0; i < bytes; i++) {",
+                  "        s += ('0' + Math.floor(Math.random() * 256).toString(16)).slice(-2);",
+                  "    }",
+                  "    return '0x' + s;",
+                  "}",
+                  "function buildPayment(value, payTo, network) {",
+                  "    const now = Math.floor(Date.now() / 1000);",
+                  "    const payload = {",
+                  "        x402Version: 1,",
+                  "        scheme: 'exact',",
+                  "        network: network,",
+                  "        payload: {",
+                  "            signature: randomHex(65),",
+                  "            authorization: {",
+                  "                from: randomHex(20),",
+                  "                to: payTo,",
+                  "                value: value,",
+                  "                validAfter: String(now - 10),",
+                  "                validBefore: String(now + 300),",
+                  "                nonce: randomHex(32)",
+                  "            }",
+                  "        }",
+                  "    };",
+                  "    return CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(JSON.stringify(payload)));",
+                  "}",
+                  "const xpay = buildPayment(pm.collectionVariables.get('price'), '0x0000000000000000000000000000000000000001', pm.collectionVariables.get('network'));",
+                  "pm.collectionVariables.set('xpayBad', xpay);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('wrong pay_to is rejected (403)', function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-PAYMENT", "value": "{{xpayBad}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/premium/report",
+              "host": ["{{baseUrl}}"],
+              "path": ["premium", "report"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Healthz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('healthz ok (200)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/healthz",
+              "host": ["{{adminUrl}}"],
+              "path": ["healthz"]
+            }
+          }
+        },
+        {
+          "name": "Readyz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('readyz ok (200)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/readyz",
+              "host": ["{{adminUrl}}"],
+              "path": ["readyz"]
+            }
+          }
+        },
+        {
+          "name": "Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/metrics",
+              "host": ["{{adminUrl}}"],
+              "path": ["metrics"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

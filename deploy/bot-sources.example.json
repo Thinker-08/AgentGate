@@ -1,0 +1,19 @@
+{
+  "google": [
+    { "url": "https://developers.google.com/static/search/apis/ipranges/googlebot.json", "format": "prefixes" }
+  ],
+  "microsoft": [
+    { "url": "https://www.bing.com/toolbox/bingbot.json", "format": "prefixes" }
+  ],
+  "openai": [
+    { "url": "https://openai.com/gptbot.json", "format": "prefixes" },
+    { "url": "https://openai.com/searchbot.json", "format": "prefixes" },
+    { "url": "https://openai.com/chatgpt-user.json", "format": "prefixes" }
+  ],
+  "anthropic": [
+    { "url": "https://example.invalid/anthropic-ranges.json", "format": "list" }
+  ],
+  "perplexity": [
+    { "url": "https://www.perplexity.ai/perplexitybot.json", "format": "prefixes" }
+  ]
+}
